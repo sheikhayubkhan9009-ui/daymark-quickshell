@@ -28,7 +28,7 @@ On other distributions, install Quickshell and libnotify using that distribution
 
 ## Install
 
-Download and extract the repository archive from GitHub, or clone the repository. From the extracted `daymark-quickshell` directory, run:
+Download and extract the repository archive from GitHub, or clone the repository. From the project directory, run:
 
 ```sh
 sh install.sh
