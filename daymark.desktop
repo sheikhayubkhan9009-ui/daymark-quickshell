@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Daymark Calendar
+Comment=Compact Quickshell calendar with event reminders
+Exec=qs --no-duplicate --config daymark
+Terminal=false
+Type=Application
+Categories=Utility;Calendar;
+StartupNotify=false
