@@ -1,26 +1,30 @@
 import QtQuick
 import QtQuick.Layouts
+import QtCore
 import Quickshell
 import Quickshell.Io
 
 Item {
     id: root
 
-    PersistentProperties {
+    Settings {
         id: calendarPreferences
-        reloadableId: "calendar-widget-position"
+        location: Qt.resolvedUrl("daymark-settings.ini")
         property int themeIndex: 0
         property string anchorCorner: "top-right"
-        property int offsetX: 16
-        property int offsetY: 80
+        property int offsetX: 0
+        property int offsetY: 90
+        property bool behindWindows: false
     }
 
     property bool isLarge: false
     property bool settingsOpen: false
-    property int themeIndex: calendarPreferences.themeIndex
-    property string anchorCorner: calendarPreferences.anchorCorner
-    property int offsetX: calendarPreferences.offsetX
-    property int offsetY: calendarPreferences.offsetY
+    property bool positionLocked: true
+    property alias themeIndex: calendarPreferences.themeIndex
+    property alias anchorCorner: calendarPreferences.anchorCorner
+    property alias offsetX: calendarPreferences.offsetX
+    property alias offsetY: calendarPreferences.offsetY
+    property alias behindWindows: calendarPreferences.behindWindows
     property real themePulse: 0.3
     property var themes: [
         { name: "Nebula", bg: "#171522", panel: "#28233a", accent: "#c4a7e7", text: "#f0eaff", muted: "#aaa0bf", event: "#ff83b7", shadow: "#090810" },
@@ -54,13 +58,16 @@ Item {
     property bool notificationPending: false
     property var notificationQueue: []
 
-    onThemeIndexChanged: calendarPreferences.themeIndex = themeIndex
-    onAnchorCornerChanged: calendarPreferences.anchorCorner = anchorCorner
-    onOffsetXChanged: calendarPreferences.offsetX = offsetX
-    onOffsetYChanged: calendarPreferences.offsetY = offsetY
+    Component.onCompleted: {
+        if (positionLocked) {
+            anchorCorner = "top-right"
+            offsetX = 0
+            offsetY = 98
+        }
+    }
 
-    implicitWidth: settingsOpen ? 220 : (isLarge ? 240 : 112)
-    implicitHeight: settingsOpen ? 220 : (isLarge ? 280 : 72)
+    implicitWidth: settingsOpen ? 220 : (isLarge ? 240 : 112.2)
+    implicitHeight: settingsOpen ? 220 : (isLarge ? 280 : 76.5)
 
     Behavior on implicitWidth {
         NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
@@ -307,26 +314,44 @@ Item {
                     }
                 }
 
-                DepthButton {
-                    implicitWidth: 14
-                    implicitHeight: 20
-                    text: "+"
-                    fontSize: 14
-                    faceColor: root.currentTheme.panel
-                    accentColor: root.currentTheme.accent
-                    shadowColor: root.currentTheme.shadow
-                    onClicked: root.isLarge = true
-                }
+                ColumnLayout {
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: 16
+                    spacing: 2
 
-                DepthButton {
-                    implicitWidth: 14
-                    implicitHeight: 20
-                    text: "S"
-                    fontSize: 9
-                    faceColor: root.currentTheme.panel
-                    accentColor: root.currentTheme.accent
-                    shadowColor: root.currentTheme.shadow
-                    onClicked: root.settingsOpen = true
+                    DepthButton {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        text: "+"
+                        fontSize: 12
+                        faceColor: root.currentTheme.panel
+                        accentColor: root.currentTheme.accent
+                        shadowColor: root.currentTheme.shadow
+                        onClicked: root.isLarge = true
+                    }
+
+                    DepthButton {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        text: root.behindWindows ? "T" : "B"
+                        fontSize: 9
+                        highlighted: root.behindWindows
+                        faceColor: root.currentTheme.panel
+                        accentColor: root.currentTheme.accent
+                        shadowColor: root.currentTheme.shadow
+                        onClicked: root.behindWindows = !root.behindWindows
+                    }
+
+                    DepthButton {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        text: "S"
+                        fontSize: 9
+                        faceColor: root.currentTheme.panel
+                        accentColor: root.currentTheme.accent
+                        shadowColor: root.currentTheme.shadow
+                        onClicked: root.settingsOpen = true
+                    }
                 }
             }
 
@@ -404,6 +429,18 @@ Item {
                         root.isLarge = false
                         root.settingsOpen = true
                     }
+                }
+
+                DepthButton {
+                    implicitWidth: 20
+                    implicitHeight: 20
+                    text: root.behindWindows ? "T" : "B"
+                    fontSize: 9
+                    highlighted: root.behindWindows
+                    faceColor: root.currentTheme.panel
+                    accentColor: root.currentTheme.accent
+                    shadowColor: root.currentTheme.shadow
+                    onClicked: root.behindWindows = !root.behindWindows
                 }
             }
 
@@ -604,6 +641,8 @@ Item {
             }
 
             Text {
+                visible: !root.positionLocked
+                enabled: !root.positionLocked
                 text: "Widget location"
                 color: root.currentTheme.muted
                 font.pixelSize: 9
@@ -611,6 +650,8 @@ Item {
             }
 
             GridLayout {
+                visible: !root.positionLocked
+                enabled: !root.positionLocked
                 Layout.fillWidth: true
                 columns: 4
                 rowSpacing: 3
@@ -631,12 +672,14 @@ Item {
                         textColor: root.currentTheme.text
                         shadowColor: root.currentTheme.shadow
                         highlighted: root.anchorCorner === modelData
-                        onClicked: root.anchorCorner = modelData
+                        onClicked: if (!root.positionLocked) root.anchorCorner = modelData
                     }
                 }
             }
 
             RowLayout {
+                visible: !root.positionLocked
+                enabled: !root.positionLocked
                 Layout.fillWidth: true
                 spacing: 4
 
@@ -654,7 +697,7 @@ Item {
                     faceColor: root.currentTheme.panel
                     accentColor: root.currentTheme.accent
                     shadowColor: root.currentTheme.shadow
-                    onClicked: root.offsetX = Math.max(0, root.offsetX - 16)
+                    onClicked: if (!root.positionLocked) root.offsetX = Math.max(0, root.offsetX - 16)
                 }
 
                 Text {
@@ -672,11 +715,13 @@ Item {
                     faceColor: root.currentTheme.panel
                     accentColor: root.currentTheme.accent
                     shadowColor: root.currentTheme.shadow
-                    onClicked: root.offsetX = Math.min(600, root.offsetX + 16)
+                    onClicked: if (!root.positionLocked) root.offsetX = Math.min(600, root.offsetX + 16)
                 }
             }
 
             RowLayout {
+                visible: !root.positionLocked
+                enabled: !root.positionLocked
                 Layout.fillWidth: true
                 spacing: 4
 
@@ -694,7 +739,7 @@ Item {
                     faceColor: root.currentTheme.panel
                     accentColor: root.currentTheme.accent
                     shadowColor: root.currentTheme.shadow
-                    onClicked: root.offsetY = Math.max(0, root.offsetY - 16)
+                    onClicked: if (!root.positionLocked) root.offsetY = Math.max(0, root.offsetY - 16)
                 }
 
                 Text {
@@ -712,7 +757,7 @@ Item {
                     faceColor: root.currentTheme.panel
                     accentColor: root.currentTheme.accent
                     shadowColor: root.currentTheme.shadow
-                    onClicked: root.offsetY = Math.min(600, root.offsetY + 16)
+                    onClicked: if (!root.positionLocked) root.offsetY = Math.min(600, root.offsetY + 16)
                 }
             }
         }
