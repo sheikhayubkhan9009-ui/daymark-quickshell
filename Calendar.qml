@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import QtCore
 import Quickshell
@@ -15,6 +16,7 @@ Item {
         property int offsetX: 0
         property int offsetY: 90
         property bool behindWindows: false
+        property string calendarSource: ""
     }
 
     property bool isLarge: false
@@ -25,6 +27,7 @@ Item {
     property alias offsetX: calendarPreferences.offsetX
     property alias offsetY: calendarPreferences.offsetY
     property alias behindWindows: calendarPreferences.behindWindows
+    property alias calendarSource: calendarPreferences.calendarSource
     property real themePulse: 0.3
     property var themes: [
         { name: "Nebula", bg: "#171522", panel: "#28233a", accent: "#c4a7e7", text: "#f0eaff", muted: "#aaa0bf", event: "#ff83b7", shadow: "#090810" },
@@ -39,11 +42,9 @@ Item {
         { name: "Monochrome", bg: "#1c1d20", panel: "#33363b", accent: "#e5e7eb", text: "#f7f7f8", muted: "#aaadb4", event: "#ff9e7a", shadow: "#090a0b" }
     ]
     readonly property var currentTheme: themes[themeIndex]
-    property var events: ({
-        "2026-10-15": "Release new QML widgets",
-        "2026-10-20": "Arch Linux system upgrade",
-        "2026-10-25": "Hollow Knight gaming session"
-    })
+    property var events: ({})
+    property var sharedEvents: ({})
+    property var feedEvents: ({})
     property date currentDate: new Date()
     property int displayYear: currentDate.getFullYear()
     property int displayMonth: currentDate.getMonth()
@@ -51,12 +52,30 @@ Item {
     property date selectedDate: currentDate
     property string hoveredDateKey: ""
     property var eventTimes: ({})
+    property var sharedEventTimes: ({})
+    property var feedEventTimes: ({})
     property var reminderSent: ({})
     property bool editorOpen: false
     property string editorError: ""
+    property string feedStatus: "No calendar connected"
     property string notificationMessage: ""
     property bool notificationPending: false
     property var notificationQueue: []
+    property string activeWidget: "none"
+    readonly property string focusPath: Quickshell.env("XDG_RUNTIME_DIR") + "/daymark-widget-focus"
+    readonly property string sharedEventsDir: Quickshell.env("HOME") + "/.local/share/qs-notes"
+    readonly property string sharedEventsPath: sharedEventsDir + "/calendar-events.json"
+    readonly property bool widgetExpanded: isLarge || settingsOpen || editorOpen
+    readonly property bool selectedEventIsLocal: sharedEvents[dateKey(selectedDate)] !== undefined
+                                                  && sharedEvents[dateKey(selectedDate)] === events[dateKey(selectedDate)]
+
+    onIsLargeChanged: syncWidgetFocus()
+    onSettingsOpenChanged: syncWidgetFocus()
+    onEditorOpenChanged: syncWidgetFocus()
+    onActiveWidgetChanged: {
+        if (activeWidget === "none" && widgetExpanded) syncWidgetFocus()
+        else if (activeWidget === "calendar" && !widgetExpanded) syncWidgetFocus()
+    }
 
     Component.onCompleted: {
         if (positionLocked) {
@@ -64,10 +83,12 @@ Item {
             offsetX = 0
             offsetY = 98
         }
+        if (calendarSource.trim())
+            Qt.callLater(function() { root.refreshCalendarSource() })
     }
 
-    implicitWidth: settingsOpen ? 220 : (isLarge ? 240 : 112.2)
-    implicitHeight: settingsOpen ? 220 : (isLarge ? 280 : 76.5)
+    implicitWidth: settingsOpen ? 220 : (editorOpen ? 240 : (isLarge ? 240 : 112.2))
+    implicitHeight: settingsOpen ? 310 : (editorOpen ? 300 : (isLarge ? 280 : 76.5))
 
     Behavior on implicitWidth {
         NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
@@ -88,8 +109,193 @@ Item {
         return date.getFullYear() + "-" + month + "-" + day
     }
 
+    function rebuildCalendarEvents() {
+        events = Object.assign({}, feedEvents, sharedEvents)
+        eventTimes = Object.assign({}, feedEventTimes, sharedEventTimes)
+    }
+
+    function unescapeIcs(value) {
+        return String(value).replace(/\\[nN]/g, "\n")
+                             .replace(/\\([,;\\])/g, "$1")
+    }
+
+    function parseIcsStart(value) {
+        var dateMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(value)
+        if (dateMatch) {
+            var allDay = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]))
+            if (allDay.getFullYear() !== Number(dateMatch[1]) || allDay.getMonth() !== Number(dateMatch[2]) - 1 || allDay.getDate() !== Number(dateMatch[3]))
+                return null
+            return { date: dateKey(allDay), time: "00:00" }
+        }
+
+        var timeMatch = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/.exec(value)
+        if (!timeMatch) return null
+        var year = Number(timeMatch[1])
+        var month = Number(timeMatch[2]) - 1
+        var day = Number(timeMatch[3])
+        var hour = Number(timeMatch[4])
+        var minute = Number(timeMatch[5])
+        var second = Number(timeMatch[6] || 0)
+        var parsed = timeMatch[7]
+            ? new Date(Date.UTC(year, month, day, hour, minute, second))
+            : new Date(year, month, day, hour, minute, second)
+        if (!timeMatch[7] && (parsed.getFullYear() !== year || parsed.getMonth() !== month || parsed.getDate() !== day || hour > 23 || minute > 59))
+            return null
+        function two(number) { return number < 10 ? "0" + number : String(number) }
+        return { date: dateKey(parsed), time: two(parsed.getHours()) + ":" + two(parsed.getMinutes()) }
+    }
+
+    function parseICalendar(data) {
+        var lines = String(data).replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "").split(/\r?\n/)
+        var importedEvents = ({})
+        var importedTimes = ({})
+        var current = null
+
+        for (var index = 0; index < lines.length; index++) {
+            var line = lines[index]
+            if (line === "BEGIN:VEVENT") {
+                current = {}
+                continue
+            }
+            if (line === "END:VEVENT" && current) {
+                var start = parseIcsStart(current.start || "")
+                if (start) {
+                    var title = unescapeIcs(current.summary || "Calendar event")
+                    importedEvents[start.date] = importedEvents[start.date]
+                        ? importedEvents[start.date] + " · " + title : title
+                    if (!importedTimes[start.date] || start.time < importedTimes[start.date])
+                        importedTimes[start.date] = start.time
+                }
+                current = null
+                continue
+            }
+            if (!current) continue
+
+            var separator = line.indexOf(":")
+            if (separator < 0) continue
+            var property = line.substring(0, separator).split(";")[0].toUpperCase()
+            var value = line.substring(separator + 1)
+            if (property === "DTSTART") current.start = value
+            else if (property === "SUMMARY") current.summary = value
+        }
+
+        feedEvents = importedEvents
+        feedEventTimes = importedTimes
+        rebuildCalendarEvents()
+        var count = Object.keys(importedEvents).length
+        feedStatus = count ? "Loaded " + count + " event dates" : "No events found in source"
+        console.info("Calendar feed test:", feedStatus)
+    }
+
+    function refreshCalendarSource() {
+        var source = calendarSource.trim()
+        if (!source) {
+            feedEvents = ({})
+            feedEventTimes = ({})
+            rebuildCalendarEvents()
+            feedStatus = "No calendar connected"
+            return
+        }
+
+        if (calendarFeedProcess.running) calendarFeedProcess.running = false
+        if (source.indexOf("webcal://") === 0)
+            source = "https://" + source.substring(9)
+
+        if (source.indexOf("http://") === 0 || source.indexOf("https://") === 0) {
+            calendarFeedProcess.command = ["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", "25", source]
+        } else {
+            if (source.indexOf("file://") === 0) source = decodeURIComponent(source.substring(7))
+            if (source.indexOf("~/") === 0) source = Quickshell.env("HOME") + source.substring(1)
+            calendarFeedProcess.command = ["cat", source]
+        }
+
+        feedStatus = "Syncing calendar..."
+        calendarFeedProcess.running = true
+    }
+
+    function compactEventSummary() {
+        var todayKey = dateKey(currentDate)
+        if (events[todayKey])
+            return events[todayKey]
+
+        var now = new Date()
+        var nextKey = ""
+        var nextTime = Infinity
+        for (var key in events) {
+            var dateParts = key.split("-")
+            var timeParts = (eventTimes[key] || "23:59").split(":")
+            var eventDate = new Date(Number(dateParts[0]), Number(dateParts[1]) - 1,
+                                     Number(dateParts[2]), Number(timeParts[0]), Number(timeParts[1]))
+            if (eventDate >= now && eventDate.getTime() < nextTime) {
+                nextKey = key
+                nextTime = eventDate.getTime()
+            }
+        }
+
+        if (!nextKey)
+            return "No event today"
+        var nextDate = new Date(nextKey + "T00:00:00")
+        return Qt.formatDate(nextDate, "MMM d") + ": " + events[nextKey]
+    }
+
     function cycleTheme() {
         themeIndex = (themeIndex + 1) % themes.length
+    }
+
+    function syncWidgetFocus() {
+        if (widgetExpanded) {
+            focusFile.setText("calendar")
+            activeWidget = "calendar"
+        } else if (activeWidget === "calendar") {
+            focusFile.setText("none")
+            activeWidget = "none"
+        }
+    }
+
+    Process {
+        running: true
+        command: ["mkdir", "-p", root.sharedEventsDir]
+    }
+
+    FileView {
+        id: focusFile
+        path: root.focusPath
+        watchChanges: true
+        onLoaded: {
+            var value = text().trim() || "none"
+            if (root.activeWidget !== value) root.activeWidget = value
+            if (value === "calendar" && !root.widgetExpanded) root.syncWidgetFocus()
+            if (value === "none" && root.widgetExpanded) root.syncWidgetFocus()
+        }
+        onFileChanged: focusReloadTimer.restart()
+    }
+
+    Timer {
+        id: focusReloadTimer
+        interval: 100
+        onTriggered: focusFile.reload()
+    }
+
+    FileView {
+        id: sharedEventsFile
+        path: root.sharedEventsPath
+        watchChanges: true
+        onLoaded: {
+            try {
+                var data = JSON.parse(text())
+                root.sharedEvents = data.events || {}
+                root.sharedEventTimes = data.eventTimes || {}
+                root.rebuildCalendarEvents()
+                root.checkReminders()
+            } catch (e) {}
+        }
+        onFileChanged: sharedEventsReloadTimer.restart()
+    }
+
+    Timer {
+        id: sharedEventsReloadTimer
+        interval: 100
+        onTriggered: sharedEventsFile.reload()
     }
 
     function shiftMonth(amount) {
@@ -152,13 +358,15 @@ Item {
         }
 
         var key = dateKey(selectedDate)
-        var updatedEvents = Object.assign({}, events)
+        var updatedEvents = Object.assign({}, sharedEvents)
         updatedEvents[key] = title
-        events = updatedEvents
+        sharedEvents = updatedEvents
 
-        var updatedTimes = Object.assign({}, eventTimes)
+        var updatedTimes = Object.assign({}, sharedEventTimes)
         updatedTimes[key] = time
-        eventTimes = updatedTimes
+        sharedEventTimes = updatedTimes
+        rebuildCalendarEvents()
+        sharedEventsFile.setText(JSON.stringify({ events: sharedEvents, eventTimes: sharedEventTimes }))
 
         var updatedReminders = Object.assign({}, reminderSent)
         delete updatedReminders[key]
@@ -167,11 +375,31 @@ Item {
         checkReminders()
     }
 
+    function deleteEvent() {
+        var key = dateKey(selectedDate)
+        if (!selectedEventIsLocal) return
+
+        var updatedEvents = Object.assign({}, sharedEvents)
+        var updatedTimes = Object.assign({}, sharedEventTimes)
+        delete updatedEvents[key]
+        delete updatedTimes[key]
+        sharedEvents = updatedEvents
+        sharedEventTimes = updatedTimes
+        rebuildCalendarEvents()
+        sharedEventsFile.setText(JSON.stringify({ events: sharedEvents, eventTimes: sharedEventTimes }))
+
+        var updatedReminders = Object.assign({}, reminderSent)
+        delete updatedReminders[key]
+        reminderSent = updatedReminders
+        editorOpen = false
+        editorError = ""
+    }
+
     function queueNotification(message) {
         var updatedQueue = notificationQueue.slice()
         updatedQueue.push(message)
         notificationQueue = updatedQueue
-        dispatchNotification()
+        root.dispatchNotification()
     }
 
     function dispatchNotification() {
@@ -202,11 +430,11 @@ Item {
             if (reminderStage < 1 && now >= eventDate) {
                 updatedReminders[key] = 1
                 changed = true
-                queueNotification(events[key] + " is scheduled for now (" + Qt.formatTime(eventDate, "HH:mm") + ").")
+                root.queueNotification(events[key] + " is scheduled for now (" + Qt.formatTime(eventDate, "HH:mm") + ").")
             } else if (reminderStage < 2 && now >= new Date(eventDate.getTime() + 5 * 60 * 1000)) {
                 updatedReminders[key] = 2
                 changed = true
-                queueNotification("Follow-up: " + events[key] + " started 5 minutes ago.")
+                root.queueNotification("Follow-up: " + events[key] + " started 5 minutes ago.")
             }
         }
 
@@ -295,7 +523,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: root.events[root.dateKey(root.currentDate)] || "No event today"
+                        text: root.compactEventSummary()
                         color: root.currentTheme.muted
                         font.pixelSize: 7
                         elide: Text.ElideRight
@@ -641,6 +869,62 @@ Item {
             }
 
             Text {
+                text: "Calendar app feed"
+                color: root.currentTheme.muted
+                font.pixelSize: 9
+                font.bold: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 5
+
+                TextField {
+                    id: calendarSourceInput
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 30
+                    text: root.calendarSource
+                    placeholderText: "iCalendar URL or .ics file"
+                    color: root.currentTheme.text
+                    placeholderTextColor: root.currentTheme.muted
+                    font.pixelSize: 9
+                    selectByMouse: true
+                    onAccepted: {
+                        root.calendarSource = text.trim()
+                        root.refreshCalendarSource()
+                    }
+                    background: Rectangle {
+                        color: root.currentTheme.shadow
+                        border.color: root.currentTheme.panel
+                        radius: 3
+                    }
+                }
+
+                DepthButton {
+                    implicitWidth: 42
+                    implicitHeight: 30
+                    text: "Sync"
+                    fontSize: 9
+                    faceColor: root.currentTheme.panel
+                    accentColor: root.currentTheme.accent
+                    textColor: root.currentTheme.text
+                    shadowColor: root.currentTheme.shadow
+                    onClicked: {
+                        root.calendarSource = calendarSourceInput.text.trim()
+                        root.refreshCalendarSource()
+                    }
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: root.feedStatus
+                color: root.currentTheme.muted
+                font.pixelSize: 9
+                elide: Text.ElideRight
+            }
+
+            Text {
                 visible: !root.positionLocked
                 enabled: !root.positionLocked
                 text: "Widget location"
@@ -775,7 +1059,8 @@ Item {
         anchors.fill: parent
         z: 10
         visible: root.editorOpen
-        color: "#bb11111b"
+        color: Qt.rgba(root.currentTheme.shadow.r, root.currentTheme.shadow.g,
+                   root.currentTheme.shadow.b, 0.82)
         radius: 2
 
         MouseArea {
@@ -785,9 +1070,9 @@ Item {
         Rectangle {
             anchors.centerIn: parent
             width: parent.width - 20
-            height: 244
+            height: 264
             radius: 2
-            color: "#1e1e2e"
+            color: root.currentTheme.bg
             border.color: Qt.darker(root.currentTheme.accent, 2.2)
             border.width: 1
 
@@ -798,20 +1083,20 @@ Item {
 
                 Text {
                     text: "Event reminder"
-                    color: "#cdd6f4"
+                    color: root.currentTheme.text
                     font.pixelSize: 15
                     font.bold: true
                 }
 
                 Text {
                     text: Qt.formatDate(root.selectedDate, "ddd, MMM d, yyyy")
-                    color: "#a6adc8"
+                    color: root.currentTheme.muted
                     font.pixelSize: 11
                 }
 
                 Text {
                     text: "Event name"
-                    color: "#a6adc8"
+                    color: root.currentTheme.muted
                     font.pixelSize: 10
                 }
 
@@ -819,7 +1104,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 30
                     radius: 5
-                    color: "#11111b"
+                    color: root.currentTheme.shadow
 
                     TextInput {
                         id: eventTitleInput
@@ -828,8 +1113,8 @@ Item {
                         anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         verticalAlignment: TextInput.AlignVCenter
-                        color: "#cdd6f4"
-                        selectionColor: "#45475a"
+                        color: root.currentTheme.text
+                        selectionColor: root.currentTheme.panel
                         font.pixelSize: 11
                         clip: true
                     }
@@ -837,7 +1122,7 @@ Item {
 
                 Text {
                     text: "Time (24-hour)"
-                    color: "#a6adc8"
+                    color: root.currentTheme.muted
                     font.pixelSize: 10
                 }
 
@@ -845,7 +1130,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 30
                     radius: 5
-                    color: "#11111b"
+                    color: root.currentTheme.shadow
 
                     TextInput {
                         id: eventTimeInput
@@ -853,8 +1138,8 @@ Item {
                         anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         verticalAlignment: TextInput.AlignVCenter
-                        color: "#cdd6f4"
-                        selectionColor: "#45475a"
+                        color: root.currentTheme.text
+                        selectionColor: root.currentTheme.panel
                         font.pixelSize: 11
                         inputMethodHints: Qt.ImhTime
                         maximumLength: 5
@@ -864,7 +1149,7 @@ Item {
                 Text {
                     Layout.fillWidth: true
                     text: root.editorError || "Notification 5 minutes before"
-                    color: root.editorError ? "#f38ba8" : "#fab387"
+                    color: root.editorError ? root.currentTheme.event : root.currentTheme.muted
                     font.pixelSize: 10
                     elide: Text.ElideRight
                 }
@@ -883,6 +1168,19 @@ Item {
                         textColor: root.currentTheme.text
                         shadowColor: root.currentTheme.shadow
                         onClicked: root.editorOpen = false
+                    }
+
+                    DepthButton {
+                        visible: root.selectedEventIsLocal
+                        Layout.preferredWidth: root.selectedEventIsLocal ? 62 : 0
+                        Layout.preferredHeight: 28
+                        text: "Delete"
+                        fontSize: 10
+                        faceColor: root.currentTheme.event
+                        accentColor: root.currentTheme.accent
+                        textColor: root.currentTheme.bg
+                        shadowColor: root.currentTheme.shadow
+                        onClicked: root.deleteEvent()
                     }
 
                     DepthButton {
@@ -916,6 +1214,24 @@ Item {
         running: true
         triggeredOnStart: true
         onTriggered: root.checkReminders()
+    }
+
+    Process {
+        id: calendarFeedProcess
+        command: []
+        stdout: StdioCollector {
+            onStreamFinished: root.parseICalendar(text)
+        }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) root.feedStatus = "Could not load calendar source"
+        }
+    }
+
+    Timer {
+        interval: 15 * 60 * 1000
+        repeat: true
+        running: root.calendarSource.trim().length > 0
+        onTriggered: root.refreshCalendarSource()
     }
 
     Timer {

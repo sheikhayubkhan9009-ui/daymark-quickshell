@@ -4,8 +4,10 @@ import Quickshell.Wayland
 
 ShellRoot {
     PanelWindow {
-        WlrLayershell.layer: calendar.behindWindows ? WlrLayer.Bottom : WlrLayer.Top
-        aboveWindows: !calendar.behindWindows
+        WlrLayershell.layer: calendar.widgetExpanded && calendar.activeWidget === "calendar" ? WlrLayer.Overlay
+                     : (calendar.activeWidget === "notes" || calendar.behindWindows ? WlrLayer.Bottom : WlrLayer.Top)
+        aboveWindows: (calendar.widgetExpanded && calendar.activeWidget === "calendar")
+                  || (calendar.activeWidget === "none" && !calendar.behindWindows)
         anchors {
             top: calendar.anchorCorner.startsWith("top-")
             bottom: calendar.anchorCorner.startsWith("bottom-")
